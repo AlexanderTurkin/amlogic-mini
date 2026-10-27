@@ -1,0 +1,225 @@
+name: Build and release
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag (for example v0.4.0 or v0.4.0-rc12)'
+        required: true
+        default: v0.4.0-rc12
+        type: string
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate manual release tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z][0-9A-Za-z.+-]*)?$ ]] || [[ ${#RELEASE_TAG} -gt 64 ]]; then
+            echo 'Release tag must look like v0.4.0 or v0.4.0-rc12'
+            exit 1
+          fi
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install libusb pkgconf
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-libusb
+          path-type: inherit
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Go and packaging checks
+        if: runner.os != 'Windows'
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          go mod verify
+      - name: Windows checks
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          builddir=$(python scripts/windows_input.py --work "$RUNNER_TEMP/amlogic-mini-input")
+          cd "$builddir"
+          go test -mod=vendor ./...
+          go test -race -mod=vendor ./...
+          go vet -mod=vendor ./...
+
+  packages:
+    needs: test
+    runs-on: macos-latest
+    env:
+      AMLOGIC_MINI_VERSION: ${{ inputs.version || (github.ref_type == 'tag' && github.ref_name || '') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Build tools
+        run: |
+          brew install zig pkgconf
+          printf '%s\n' "GOCACHE=$RUNNER_TEMP/amlogic-mini-go-cache" \
+            "GOMODCACHE=$RUNNER_TEMP/amlogic-mini-go-mod" \
+            "ZIG_LOCAL_CACHE_DIR=$RUNNER_TEMP/zig-local" \
+            "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global" >> "$GITHUB_ENV"
+      - name: Build three archives
+        run: 'python3 scripts/release.py --target darwin-arm64 --target windows-amd64 --target linux-amd64 --work "$RUNNER_TEMP/amlogic-mini-release"'
+      - name: Test packaged macOS binary
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir "$RUNNER_TEMP/mac-package"
+          unzip -q dist/*-darwin-arm64.zip -d "$RUNNER_TEMP/mac-package"
+          chmod +x "$RUNNER_TEMP/mac-package/amlogic-mini"
+          AMLOGIC_MINI_TEST_EXE="$RUNNER_TEMP/mac-package/amlogic-mini" go test -count=1 ./internal/smoke
+      - uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: dist/*-darwin-arm64.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: dist/*-windows-amd64.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          archive: false
+          path: dist/*-linux-amd64.zip
+          if-no-files-found: error
+
+  windows-package:
+    needs: packages
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: amlogic-mini-*-windows-amd64.zip
+          merge-multiple: true
+          skip-decompress: true
+          path: package
+      - name: Test packaged Windows binary and driver preparation
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+          AMLOGIC_MINI_TEST_DRIVER: '1'
+          AMLOGIC_MINI_TEST_DRIVER_INSTALL: '1'
+        run: |
+          $archive = Get-ChildItem package/*.zip
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath package/unpacked
+          $env:AMLOGIC_MINI_TEST_EXE = (Resolve-Path package/unpacked/amlogic-mini.exe).Path
+          go test -c -o "$env:RUNNER_TEMP/package.test.exe" ./internal/smoke
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:SystemRoot/System32;$env:SystemRoot"
+          & "$env:RUNNER_TEMP/package.test.exe" '-test.v' '-test.timeout=3m'
+
+  linux-package:
+    needs: packages
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu:24.04, debian:trixie-slim, 'registry.fedoraproject.org/fedora:44', archlinux:base, alpine:3.24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: amlogic-mini-*-linux-amd64.zip
+          merge-multiple: true
+          skip-decompress: true
+          path: package
+      - name: Verify static Linux binary and test in distribution
+        env:
+          CGO_ENABLED: '0'
+          TEST_IMAGE: ${{ matrix.image }}
+        run: |
+          mkdir "$RUNNER_TEMP/linux-package"
+          unzip -q package/*.zip -d "$RUNNER_TEMP/linux-package"
+          headers=$(readelf -lW "$RUNNER_TEMP/linux-package/amlogic-mini")
+          case "$headers" in *INTERP*) echo 'Linux binary needs a dynamic loader'; exit 1;; esac
+          dynamic=$(readelf -dW "$RUNNER_TEMP/linux-package/amlogic-mini")
+          case "$dynamic" in *NEEDED*) echo 'Linux binary needs shared libraries'; exit 1;; esac
+          sections=$(readelf -SW "$RUNNER_TEMP/linux-package/amlogic-mini")
+          case "$sections" in *.debug_*) echo 'Linux binary contains debug metadata'; exit 1;; esac
+          go test -c -o "$RUNNER_TEMP/package.test" ./internal/smoke
+          docker run --rm --network none \
+            -v "$RUNNER_TEMP/linux-package:/package:ro" \
+            -v "$RUNNER_TEMP/package.test:/package.test:ro" \
+            -e AMLOGIC_MINI_TEST_EXE=/package/amlogic-mini \
+            "$TEST_IMAGE" /package.test -test.v -test.timeout=2m
+
+  release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [packages, windows-package, linux-package]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ inputs.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: amlogic-mini-*.zip
+          merge-multiple: true
+          skip-decompress: true
+          path: packages
+      - name: Publish three archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          test "$(find packages -maxdepth 1 -name '*.zip' | wc -l)" -eq 3
+          existing=$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG")
+          if [ -n "$existing" ]; then
+            git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            if [ "$(git rev-parse "$RELEASE_TAG^{commit}")" != "$GITHUB_SHA" ]; then
+              echo 'Release tag already points to another commit; choose a new version'
+              exit 1
+            fi
+          fi
+          flags=()
+          if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then flags+=(--prerelease); fi
+          printf '%s\n' 'CLI-инструмент для прошивки Alpine Linux на Amlogic A113X.' \
+            'В каждом архиве: программа, пустые backups/ и alpine/.' \
+            "Исходники и пересборка: https://github.com/$GH_REPO/tree/$RELEASE_TAG" \
+            'Собственный код: MIT. Все лицензии: amlogic-mini --licenses. Соответствующие исходники libusb/libwdi и патч входят в third_party/ и scripts/ по ссылке на исходники релиза.' > notes.md
+          gh release create "$RELEASE_TAG" packages/*.zip --target "$GITHUB_SHA" "${flags[@]}" --title "Amlogic A113X Mini $RELEASE_TAG" --notes-file notes.md

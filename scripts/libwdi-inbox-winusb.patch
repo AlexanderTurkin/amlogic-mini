@@ -1,0 +1,105 @@
+--- a/libwdi/embedder_files.h
++++ b/libwdi/embedder_files.h
+@@ -42,16 +42,8 @@
+ struct emb embeddable_fixed[] = {
+ 
+ // WinUSB
+-#if defined(WDK_DIR)
+-#	if defined(OPT_M32)
+-		{ 0, WDK_DIR "\\redist\\wdf\\x86\\WdfCoInstaller0" STR(WDF_VER) ".dll", "x86" },
+-		{ 0, WDK_DIR "\\redist\\" COINSTALLER_DIR "\\x86\\winusbcoinstaller2.dll", "x86" },
+-#	endif	// OPT_M32
+-#	if defined(OPT_M64)
+-		{ 0, WDK_DIR "\\redist\\wdf\\" X64_DIR "\\WdfCoInstaller0" STR(WDF_VER) ".dll", "amd64" },
+-		{ 0, WDK_DIR "\\redist\\" COINSTALLER_DIR "\\" X64_DIR "\\winusbcoinstaller2.dll", "amd64" },
+-#	endif	// OPT_M64
+-#endif	// WDK_DIR
++// Modified by Amlogic A113X Mini contributors, 2026-10-27:
++// Windows 10+ uses inbox WinUSB, with no WDF/WinUSB co-installer DLLs.
+ 
+ // libusb0
+ #if defined(LIBUSB0_DIR)
+--- a/libwdi/winusb.inf.in
++++ b/libwdi/winusb.inf.in
+@@ -1,5 +1,7 @@
+ ; #INF_FILENAME#
+ ; Copyright (c) 2010-2023 Pete Batard <pete@akeo.ie> (GNU LGPL)
++; Modified by Amlogic A113X Mini contributors, 2026-10-27:
++; Windows 10+ inbox WinUSB; no redistributed driver binaries.
+ [Strings]
+ DeviceName = "#DEVICE_DESCRIPTION#"
+ VendorName = "#DEVICE_MANUFACTURER#"
+@@ -39,21 +41,8 @@
+ Needs   = WINUSB.NT
+ 
+ [USB_Install.Services]
+-Include    = winusb.inf
+-AddService = WinUSB,0x00000002,WinUSB_ServiceInstall
+-
+-[WinUSB_ServiceInstall]
+-DisplayName   = "WinUSB - Kernel Driver #DRIVER_DATE# #DRIVER_VERSION#"
+-ServiceType   = 1
+-StartType     = 3
+-ErrorControl  = 1
+-ServiceBinary = %12%\WinUSB.sys
+-
+-[USB_Install.Wdf]
+-KmdfService = WINUSB, WinUsb_Install
+-
+-[WinUSB_Install]
+-KmdfLibraryVersion = #KMDF_VERSION#
++Include = winusb.inf
++Needs   = WINUSB.NT.Services
+ 
+ [USB_Install.HW]
+ AddReg = #USE_DEVICE_INTERFACE_GUID#
+@@ -63,38 +52,3 @@
+ 
+ [AddDeviceInterfaceGUID]
+ HKR,,DeviceInterfaceGUIDs,0x10000,%DeviceGUID%
+-
+-[USB_Install.NTx86.CoInstallers]
+-AddReg    = CoInstallers_AddReg
+-CopyFiles = CoInstallers_CopyFiles
+-
+-[USB_Install.NTamd64.CoInstallers]
+-AddReg    = CoInstallers_AddReg
+-CopyFiles = CoInstallers_CopyFiles
+-
+-[USB_Install.NTarm64.CoInstallers]
+-;
+-
+-[CoInstallers_AddReg]
+-HKR,,CoInstallers32,0x00010000,"WdfCoInstaller#WDF_VERSION#.dll,WdfCoInstaller","WinUSBCoInstaller2.dll"
+-
+-[CoInstallers_CopyFiles]
+-WinUSBCoInstaller2.dll
+-WdfCoInstaller#WDF_VERSION#.dll
+-
+-[DestinationDirs]
+-CoInstallers_CopyFiles = 11
+-
+-[SourceDisksNames]
+-1 = %SourceName%
+-
+-[SourceDisksFiles.x86]
+-WinUSBCoInstaller2.dll = 1,x86
+-WdfCoInstaller#WDF_VERSION#.dll = 1,x86
+-
+-[SourceDisksFiles.amd64]
+-WinUSBCoInstaller2.dll = 1,amd64
+-WdfCoInstaller#WDF_VERSION#.dll = 1,amd64
+-
+-[SourceDisksFiles.arm64]
+-;
+\ No newline at end of file
+--- a/libwdi/winusb.cat.in
++++ b/libwdi/winusb.cat.in
+@@ -1,5 +1 @@
+-# List of the binaries referenced by the WinUSB inf
+-# These are used to generate and self-sign a .cat file
+-
+-WdfCoInstaller#WDF_VERSION#.dll
+-winusbcoinstaller2.dll
+\ No newline at end of file
++# Modified by Amlogic A113X Mini contributors, 2026-10-27: inbox WinUSB needs only the INF added by libwdi.
