@@ -33,6 +33,9 @@ func main() {
 	resetFirst := flag.Bool("reset-first", false, "reset the device before identify")
 	configFirst := flag.Bool("config-first", false, "set configuration 1 before identify")
 	claim := flag.Bool("claim", true, "claim configuration 1 / interface 0 and list endpoints")
+	hold := flag.Duration("hold", 0, "keep the device open for this long after probing")
+	wait := flag.Bool("wait", false, "wait for the device and probe it as soon as it appears")
+	waitFor := flag.Duration("wait-for", 2*time.Minute, "how long to wait with -wait")
 	flag.Parse()
 
 	lengths, err := parseLengths(*lengthsFlag)
@@ -44,6 +47,11 @@ func main() {
 	defer ctx.Close()
 	if *debug > 0 {
 		ctx.Debug(*debug)
+	}
+
+	if *wait {
+		waitAndProbe(ctx, uint16(*vid), *waitFor, lengths, *resetFirst, *configFirst, *claim, *hold, *timeout)
+		return
 	}
 
 	var found []deviceInfo
@@ -100,64 +108,96 @@ func main() {
 	}
 
 	for _, dev := range devices {
-		dev.ControlTimeout = *timeout
-		_ = dev.SetAutoDetach(true)
-		product, _ := dev.Product()
-		manufacturer, _ := dev.Manufacturer()
-		serial, _ := dev.SerialNumber()
-		fmt.Printf("\nAmlogic device %04x:%04x bus %d addr %d product=%q manufacturer=%q serial=%q\n",
-			uint16(dev.Desc.Vendor), uint16(dev.Desc.Product), dev.Desc.Bus, dev.Desc.Address,
-			product, manufacturer, serial)
-		fmt.Printf("  spec=%#04x device=%#04x class=%s\n",
-			uint16(dev.Desc.Spec), uint16(dev.Desc.Device), dev.Desc.Class)
-		printDescriptors(dev.Desc)
+		probeDevice(dev, lengths, *resetFirst, *configFirst, *claim, *hold, *timeout)
+	}
+}
 
-		if active, err := dev.ActiveConfigNum(); err != nil {
-			fmt.Printf("  active config: unknown (%v)\n", err)
+func waitAndProbe(ctx *gousb.Context, vid uint16, wait time.Duration, lengths []int, resetFirst, configFirst, claim bool, hold, timeout time.Duration) {
+	start := time.Now()
+	deadline := start.Add(wait)
+	fmt.Printf("waiting for %04x for %s...\n", vid, wait)
+	for time.Now().Before(deadline) {
+		devices, err := ctx.OpenDevices(func(d *gousb.DeviceDesc) bool {
+			return uint16(d.Vendor) == vid
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open: %v\n", err)
+		}
+		if len(devices) > 0 {
+			fmt.Printf("found %04x after %s\n", vid, time.Since(start).Round(time.Millisecond))
+			for _, dev := range devices {
+				probeDevice(dev, lengths, resetFirst, configFirst, claim, hold, timeout)
+				dev.Close()
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	fmt.Println("timeout")
+}
+
+func probeDevice(dev *gousb.Device, lengths []int, resetFirst, configFirst, claim bool, hold, timeout time.Duration) {
+	dev.ControlTimeout = timeout
+	_ = dev.SetAutoDetach(true)
+	product, _ := dev.Product()
+	manufacturer, _ := dev.Manufacturer()
+	serial, _ := dev.SerialNumber()
+	fmt.Printf("\nAmlogic device %04x:%04x bus %d addr %d product=%q manufacturer=%q serial=%q\n",
+		uint16(dev.Desc.Vendor), uint16(dev.Desc.Product), dev.Desc.Bus, dev.Desc.Address,
+		product, manufacturer, serial)
+	fmt.Printf("  spec=%#04x device=%#04x class=%s\n",
+		uint16(dev.Desc.Spec), uint16(dev.Desc.Device), dev.Desc.Class)
+	printDescriptors(dev.Desc)
+
+	if active, err := dev.ActiveConfigNum(); err != nil {
+		fmt.Printf("  active config: unknown (%v)\n", err)
+	} else {
+		fmt.Printf("  active config: %d\n", active)
+	}
+
+	var cfg *gousb.Config
+	if resetFirst {
+		fmt.Printf("  usb reset: %v\n", dev.Reset())
+		time.Sleep(500 * time.Millisecond)
+	}
+	if configFirst {
+		var err error
+		cfg, err = dev.Config(1)
+		if err != nil {
+			fmt.Printf("  set configuration 1: %v\n", err)
 		} else {
-			fmt.Printf("  active config: %d\n", active)
+			fmt.Printf("  set configuration 1: ok\n")
 		}
+	}
 
-		var cfg *gousb.Config
-		if *resetFirst {
-			fmt.Printf("  usb reset: %v\n", dev.Reset())
-			time.Sleep(500 * time.Millisecond)
+	for _, n := range lengths {
+		buf := make([]byte, n)
+		got, err := dev.Control(0xc0, 0x20, 0, 0, buf)
+		shown := buf
+		if got >= 0 && got < len(buf) {
+			shown = buf[:got]
 		}
-		if *configFirst {
+		fmt.Printf("  identify len=%d -> n=%d data=% x err=%v\n", n, got, shown, err)
+	}
+
+	if claim {
+		if cfg == nil {
 			var err error
 			cfg, err = dev.Config(1)
 			if err != nil {
-				fmt.Printf("  set configuration 1: %v\n", err)
-			} else {
-				fmt.Printf("  set configuration 1: ok\n")
+				fmt.Printf("  claim config 1: %v\n", err)
 			}
 		}
-
-		for _, n := range lengths {
-			buf := make([]byte, n)
-			got, err := dev.Control(0xc0, 0x20, 0, 0, buf)
-			shown := buf
-			if got >= 0 && got < len(buf) {
-				shown = buf[:got]
-			}
-			fmt.Printf("  identify len=%d -> n=%d data=% x err=%v\n", n, got, shown, err)
-		}
-
-		if *claim {
-			if cfg == nil {
-				var err error
-				cfg, err = dev.Config(1)
-				if err != nil {
-					fmt.Printf("  claim config 1: %v\n", err)
-				}
-			}
-			if cfg != nil {
-				probeInterface(cfg)
-				cfg.Close()
-			}
-		} else if cfg != nil {
+		if cfg != nil {
+			probeInterface(cfg)
 			cfg.Close()
 		}
+	} else if cfg != nil {
+		cfg.Close()
+	}
+	if hold > 0 {
+		fmt.Printf("  holding device open for %s\n", hold)
+		time.Sleep(hold)
 	}
 }
 
