@@ -18,6 +18,8 @@ USB и предложит настроить WinUSB на Windows.
 Linux-бинарь статический, со встроенной libusb: отдельные версии для Ubuntu,
 Debian/Mint, Fedora, Arch и Alpine не нужны. Для доступа к USB запускайте
 `sudo ./amlogic-mini` либо заранее настройте права через udev.
+На macOS запускайте `sudo ./amlogic-mini`: без root (или подписи с entitlement
+`com.apple.vm.device-access`) libusb не может захватить USB-интерфейс.
 
 Собственный код — [MIT](LICENSE). Все сторонние лицензии, сведения об авторах
 и патентные разрешения доступны офлайн: `amlogic-mini --licenses`.
