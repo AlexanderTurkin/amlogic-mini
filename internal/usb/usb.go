@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"time"
 
 	"github.com/google/gousb"
@@ -61,11 +60,7 @@ func Open(ctx context.Context, timeout time.Duration) (*Connection, [7]byte, err
 				}
 				if err != nil {
 					c.Close()
-					hint := "check permissions/WinUSB driver"
-					if runtime.GOOS == "darwin" {
-						hint = "on macOS run with sudo or sign the binary with com.apple.vm.device-access"
-					}
-					return nil, version, fmt.Errorf("claim USB interface (%s): %w", hint, err)
+					return nil, version, fmt.Errorf("claim USB interface (check permissions/WinUSB driver): %w", err)
 				}
 				return c, version, nil
 			}

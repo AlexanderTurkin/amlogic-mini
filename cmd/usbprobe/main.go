@@ -33,6 +33,7 @@ func main() {
 	resetFirst := flag.Bool("reset-first", false, "reset the device before identify")
 	configFirst := flag.Bool("config-first", false, "set configuration 1 before identify")
 	claim := flag.Bool("claim", true, "claim configuration 1 / interface 0 and list endpoints")
+	autoDetach := flag.Bool("auto-detach", false, "detach the kernel driver before claiming (needs root on macOS)")
 	hold := flag.Duration("hold", 0, "keep the device open for this long after probing")
 	wait := flag.Bool("wait", false, "wait for the device and probe it as soon as it appears")
 	waitFor := flag.Duration("wait-for", 2*time.Minute, "how long to wait with -wait")
@@ -50,7 +51,7 @@ func main() {
 	}
 
 	if *wait {
-		waitAndProbe(ctx, uint16(*vid), *waitFor, lengths, *resetFirst, *configFirst, *claim, *hold, *timeout)
+		waitAndProbe(ctx, uint16(*vid), *waitFor, lengths, *resetFirst, *configFirst, *claim, *autoDetach, *hold, *timeout)
 		return
 	}
 
@@ -108,11 +109,11 @@ func main() {
 	}
 
 	for _, dev := range devices {
-		probeDevice(dev, lengths, *resetFirst, *configFirst, *claim, *hold, *timeout)
+		probeDevice(dev, lengths, *resetFirst, *configFirst, *claim, *autoDetach, *hold, *timeout)
 	}
 }
 
-func waitAndProbe(ctx *gousb.Context, vid uint16, wait time.Duration, lengths []int, resetFirst, configFirst, claim bool, hold, timeout time.Duration) {
+func waitAndProbe(ctx *gousb.Context, vid uint16, wait time.Duration, lengths []int, resetFirst, configFirst, claim, autoDetach bool, hold, timeout time.Duration) {
 	start := time.Now()
 	deadline := start.Add(wait)
 	fmt.Printf("waiting for %04x for %s...\n", vid, wait)
@@ -126,7 +127,7 @@ func waitAndProbe(ctx *gousb.Context, vid uint16, wait time.Duration, lengths []
 		if len(devices) > 0 {
 			fmt.Printf("found %04x after %s\n", vid, time.Since(start).Round(time.Millisecond))
 			for _, dev := range devices {
-				probeDevice(dev, lengths, resetFirst, configFirst, claim, hold, timeout)
+				probeDevice(dev, lengths, resetFirst, configFirst, claim, autoDetach, hold, timeout)
 				dev.Close()
 			}
 			return
@@ -136,9 +137,11 @@ func waitAndProbe(ctx *gousb.Context, vid uint16, wait time.Duration, lengths []
 	fmt.Println("timeout")
 }
 
-func probeDevice(dev *gousb.Device, lengths []int, resetFirst, configFirst, claim bool, hold, timeout time.Duration) {
+func probeDevice(dev *gousb.Device, lengths []int, resetFirst, configFirst, claim, autoDetach bool, hold, timeout time.Duration) {
 	dev.ControlTimeout = timeout
-	_ = dev.SetAutoDetach(true)
+	if autoDetach {
+		_ = dev.SetAutoDetach(true)
+	}
 	product, _ := dev.Product()
 	manufacturer, _ := dev.Manufacturer()
 	serial, _ := dev.SerialNumber()
