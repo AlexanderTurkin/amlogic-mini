@@ -47,11 +47,21 @@ func (w *wire) ReadBulk(_ context.Context, b []byte) (int, error) {
 }
 
 func TestIdentifyRejectsMalformedReplies(t *testing.T) {
-	for _, reply := range [][]byte{nil, {0, 0, 0, 0, 0, 0, 0}, {0, 7, 0, 16}} {
+	for _, reply := range [][]byte{nil, {0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0}} {
 		w := &wire{responses: [][]byte{reply}}
 		if _, err := New(w, profile.A113X()).Identify(context.Background()); err == nil {
 			t.Fatalf("accepted %x", reply)
 		}
+	}
+}
+func TestIdentifyAcceptsShortVendorReply(t *testing.T) {
+	w := &wire{responses: [][]byte{{0, 7, 0, 16}}}
+	v, err := New(w, profile.A113X()).Identify(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != [7]byte{0, 7, 0, 16, 0, 0, 0} {
+		t.Fatalf("version: %x", v)
 	}
 }
 func TestIdentifyUsesReadOnlyVendorRequest(t *testing.T) {

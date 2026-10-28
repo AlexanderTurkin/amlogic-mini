@@ -33,7 +33,10 @@ func (c *Client) Identify(ctx context.Context) ([7]byte, error) {
 	if err != nil {
 		return version, fmt.Errorf("identify: %w", err)
 	}
-	if n != 7 || bytes.Equal(version[:4], []byte{0, 0, 0, 0}) {
+	// The vendor tool requests four bytes (its handler accepts up to eight),
+	// and older bootloaders answer with a short transfer. Accept 4..7 bytes and
+	// keep the remaining version bytes zero.
+	if n < 4 || n > len(version) || bytes.Equal(version[:4], []byte{0, 0, 0, 0}) {
 		return version, fmt.Errorf("invalid identify response (%d bytes)", n)
 	}
 	return version, nil
