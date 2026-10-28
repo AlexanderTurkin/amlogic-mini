@@ -83,7 +83,9 @@ func (c *Connection) Control(ctx context.Context, k, r byte, v, i uint16, b []by
 		timeout = 60 * time.Second
 	}
 	if r == 0x20 {
-		timeout = 100 * time.Millisecond
+		// The vendor identify ioctl waits 5000 ms. A short timeout makes cold
+		// or slow boards look like they are not present.
+		timeout = 5 * time.Second
 	}
 	if end, ok := ctx.Deadline(); ok {
 		timeout = min(timeout, time.Until(end))
